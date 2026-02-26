@@ -1,18 +1,33 @@
-const wppconnect = require('@wppconnect-team/wppconnect');
 const express = require('express');
+const wppconnect = require('@wppconnect-team/wppconnect');
 
 const app = express();
 app.use(express.json());
 
 let client = null;
+let wppReady = false;
+let lastWppError = null;
 
-// rota simples pra healthcheck (Railway usa isso pra ver se tá vivo)
+// NÃO DEIXA O PROCESSO MORRER SEM MOSTRAR O ERRO
+process.on('unhandledRejection', (reason) => {
+  console.log('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.log('[uncaughtException]', err);
+});
+
 app.get('/', (req, res) => {
   res.json({
     ok: true,
-    server: 'online',
-    whatsapp: client ? 'conectado' : 'conectando'
+    bot: 'online',
+    whatsapp: wppReady ? 'conectado' : 'conectando',
+    lastWppError: lastWppError ? String(lastWppError) : null,
   });
+});
+
+app.get('/health', (req, res) => {
+  // saúde do serviço HTTP (Railway usa isso na prática)
+  res.status(200).send('ok');
 });
 
 app.post('/status', async (req, res) => {
@@ -26,8 +41,12 @@ app.post('/status', async (req, res) => {
     telefone = String(telefone).replace(/\D/g, '');
     status = String(status).trim().toLowerCase();
 
-    if (!client) {
-      return res.status(503).json({ ok: false, error: 'WhatsApp ainda conectando' });
+    if (!client || !wppReady) {
+      return res.status(503).json({
+        ok: false,
+        error: 'WhatsApp ainda conectando',
+        lastWppError: lastWppError ? String(lastWppError) : null,
+      });
     }
 
     let mensagem = '';
@@ -43,9 +62,7 @@ app.post('/status', async (req, res) => {
 
     await Promise.race([
       client.sendText(chatId, mensagem),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('timeout ao enviar mensagem')), 15000)
-      )
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout ao enviar mensagem')), 15000)),
     ]);
 
     console.log('[STATUS] enviado OK:', chatId);
@@ -56,32 +73,39 @@ app.post('/status', async (req, res) => {
   }
 });
 
-// ✅ SUBIR O SERVIDOR PRIMEIRO (isso resolve o 502)
+// ⚠️ SOBE O SERVIDOR PRIMEIRO (pra não virar 502)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('Servidor rodando na porta', PORT);
-  startWhatsapp(); // depois inicia o WhatsApp
-});
+app.listen(PORT, () => console.log('Servidor rodando na porta', PORT));
 
-// ✅ WhatsApp em background + retry se der erro
-function startWhatsapp() {
-  console.log('Iniciando WhatsApp...');
+// ✅ INICIA O WHATSAPP “EM BACKGROUND” E COM CATCH
+(async () => {
+  try {
+    console.log('[WPP] iniciando...');
 
-  wppconnect.create({
-    session: 'delivery',
-    autoClose: 0,
-    headless: true,
-    puppeteerOptions: {
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
-  })
-  .then((cli) => {
+    const cli = await wppconnect.create({
+      session: 'delivery',
+      autoClose: 0,
+      puppeteerOptions: {
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-zygote',
+          '--single-process',
+        ],
+      },
+    });
+
     client = cli;
+    wppReady = true;
+    lastWppError = null;
     console.log('WhatsApp conectado');
-  })
-  .catch((err) => {
-    client = null;
-    console.log('ERRO WhatsApp:', err?.message || err);
-    setTimeout(startWhatsapp, 5000); // tenta de novo
-  });
-}
+  } catch (e) {
+    lastWppError = e?.message || e;
+    wppReady = false;
+    console.log('[WPP] ERRO AO CONECTAR:', lastWppError);
+    // mantém o servidor vivo mesmo se o WhatsApp falhar
+  }
+})();
