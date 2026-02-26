@@ -8,6 +8,7 @@ let client;
 
 wppconnect.create({
   session: 'delivery',
+  autoClose: 0,
   puppeteerOptions: {
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
