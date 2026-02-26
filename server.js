@@ -8,6 +8,10 @@ let client = null;
 let wppReady = false;
 let lastWppError = null;
 
+// QR em imagem (base64)
+let lastQrBase64 = null;
+let lastQrAttempts = 0;
+
 // NÃO DEIXA O PROCESSO MORRER SEM MOSTRAR O ERRO
 process.on('unhandledRejection', (reason) => {
   console.log('[unhandledRejection]', reason);
@@ -22,12 +26,27 @@ app.get('/', (req, res) => {
     bot: 'online',
     whatsapp: wppReady ? 'conectado' : 'conectando',
     lastWppError: lastWppError ? String(lastWppError) : null,
+    qr: lastQrBase64 ? '/qr' : null,
+    qrAttempts: lastQrAttempts,
   });
 });
 
 app.get('/health', (req, res) => {
-  // saúde do serviço HTTP (Railway usa isso na prática)
   res.status(200).send('ok');
+});
+
+// QR como IMAGEM (pra escanear fácil)
+app.get('/qr', (req, res) => {
+  if (!lastQrBase64) return res.status(404).send('QR ainda não gerado');
+
+  const pngBase64 = lastQrBase64.replace(/^data:image\/png;base64,/, '');
+  const img = Buffer.from(pngBase64, 'base64');
+
+  res.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Cache-Control': 'no-store',
+  });
+  res.end(img);
 });
 
 app.post('/status', async (req, res) => {
@@ -46,6 +65,7 @@ app.post('/status', async (req, res) => {
         ok: false,
         error: 'WhatsApp ainda conectando',
         lastWppError: lastWppError ? String(lastWppError) : null,
+        qr: lastQrBase64 ? '/qr' : null,
       });
     }
 
@@ -62,10 +82,71 @@ app.post('/status', async (req, res) => {
 
     await Promise.race([
       client.sendText(chatId, mensagem),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout ao enviar mensagem')), 15000)),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('timeout ao enviar mensagem')), 15000)
+      ),
     ]);
 
     console.log('[STATUS] enviado OK:', chatId);
+    return res.json({ ok: true, enviadoPara: chatId });
+  } catch (err) {
+    console.log('ERRO /status:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'erro' });
+  }
+});
+
+// Inicia WPPConnect
+wppconnect
+  .create({
+    session: 'delivery',
+    autoClose: 0,
+    puppeteerOptions: {
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    },
+
+    // <- AQUI é a mágica: pega QR (imagem e ASCII)
+    catchQR: (base64Qrimg, asciiQR, attempts) => {
+      lastQrBase64 = base64Qrimg;
+      lastQrAttempts = attempts;
+      wppReady = false;
+
+      console.log('[WPP] QR atualizado - tentativas:', attempts);
+      // Se quiser ver no log também:
+      // console.log(asciiQR);
+      console.log('[WPP] Abra: /qr para escanear');
+    },
+
+    // tenta considerar logado
+    statusFind: 'isLogged',
+  })
+  .then((cli) => {
+    client = cli;
+
+    console.log('[WPP] client criado');
+
+    // Detecta quando realmente fica pronto
+    client.onStateChange((state) => {
+      console.log('[WPP] state:', state);
+
+      if (state === 'CONNECTED' || state === 'MAIN') {
+        wppReady = true;
+        lastWppError = null;
+        console.log('[WPP] WhatsApp conectado e pronto!');
+      }
+
+      if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE' || state === 'DISCONNECTED') {
+        wppReady = false;
+      }
+    });
+  })
+  .catch((err) => {
+    lastWppError = err?.message || err;
+    wppReady = false;
+    console.log('[WPP] ERRO ao iniciar:', lastWppError);
+  });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Servidor rodando na porta', PORT));
     return res.json({ ok: true, enviadoPara: chatId });
   } catch (err) {
     console.log('ERRO /status:', err?.message || err);
