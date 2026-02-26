@@ -1,19 +1,31 @@
+const wppconnect = require('@wppconnect-team/wppconnect');
+const express = require('express');
+
+const app = express();
+app.use(express.json());
+
+let client = null;
+
+// rota simples pra healthcheck (Railway usa isso pra ver se tá vivo)
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    server: 'online',
+    whatsapp: client ? 'conectado' : 'conectando'
+  });
+});
+
 app.post('/status', async (req, res) => {
   try {
     let { telefone, status } = req.body || {};
 
-    // validações
     if (!telefone || !status) {
       return res.status(400).json({ ok: false, error: 'Envie telefone e status' });
     }
 
-    // limpa telefone: deixa só números
     telefone = String(telefone).replace(/\D/g, '');
-
-    // status como string
     status = String(status).trim().toLowerCase();
 
-    // se ainda não conectou
     if (!client) {
       return res.status(503).json({ ok: false, error: 'WhatsApp ainda conectando' });
     }
@@ -29,7 +41,6 @@ app.post('/status', async (req, res) => {
     console.log('[STATUS] recebendo:', { telefone, status, chatId });
     console.log('[STATUS] enviando:', mensagem);
 
-    // timeout pra não travar o request
     await Promise.race([
       client.sendText(chatId, mensagem),
       new Promise((_, reject) =>
@@ -44,3 +55,33 @@ app.post('/status', async (req, res) => {
     return res.status(500).json({ ok: false, error: err?.message || 'erro' });
   }
 });
+
+// ✅ SUBIR O SERVIDOR PRIMEIRO (isso resolve o 502)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('Servidor rodando na porta', PORT);
+  startWhatsapp(); // depois inicia o WhatsApp
+});
+
+// ✅ WhatsApp em background + retry se der erro
+function startWhatsapp() {
+  console.log('Iniciando WhatsApp...');
+
+  wppconnect.create({
+    session: 'delivery',
+    autoClose: 0,
+    headless: true,
+    puppeteerOptions: {
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+  })
+  .then((cli) => {
+    client = cli;
+    console.log('WhatsApp conectado');
+  })
+  .catch((err) => {
+    client = null;
+    console.log('ERRO WhatsApp:', err?.message || err);
+    setTimeout(startWhatsapp, 5000); // tenta de novo
+  });
+}
